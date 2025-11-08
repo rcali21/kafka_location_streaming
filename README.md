@@ -1,0 +1,1 @@
+### Streaming application leveraging Apache Kafka to stream messages from Traccar smartphone location tracking application directly to a postgres sql database. Stood up in Docker for portabiity. 

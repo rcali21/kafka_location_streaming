@@ -1,0 +1,159 @@
+services:
+  # ---- PostgreSQL Database ----
+  postgres:
+    image: postgres:16
+    container_name: pg
+    environment:
+      - POSTGRES_DB=playground
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # ---- Kafka (single broker, KRaft) ----
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: kafka
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+    ports:
+      - "9092:9092"
+    networks:
+      - kafka-network
+
+  # ---- Kafka UI ----
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+    ports:
+      - "8080:8080"
+    depends_on:
+      - kafka
+    networks:
+      - kafka-network
+
+# GPS Enricher Service - Add this to your docker-compose.yaml
+  gps-enricher:
+    build: ./gps_enricher
+    container_name: gps-enricher
+    environment:
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DB=playground
+      - PG_USER=admin
+      - PG_PASSWORD=
+      - POLL_INTERVAL=10  # Check for new records every 10 seconds
+      - BATCH_SIZE=50      # Process up to 50 records at a time
+    depends_on:
+      - postgres
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # ---- Kafka Connect (JDBC Sink installed via Dockerfile) ----
+  connect:
+    build: ./connect
+    container_name: connect
+    environment:
+      - CONNECT_BOOTSTRAP_SERVERS=kafka:9092
+      - CONNECT_REST_PORT=8083
+      - CONNECT_GROUP_ID=connect-cluster
+      # internal topics (single broker → RF=1)
+      - CONNECT_CONFIG_STORAGE_TOPIC=_connect-configs
+      - CONNECT_OFFSET_STORAGE_TOPIC=_connect-offsets
+      - CONNECT_STATUS_STORAGE_TOPIC=_connect-status
+      - CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR=1
+      - CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR=1
+      - CONNECT_STATUS_STORAGE_REPLICATION_FACTOR=1
+      # NO QUOTES HERE
+      - CONNECT_REST_ADVERTISED_HOST_NAME=connect
+      # converters
+      - CONNECT_KEY_CONVERTER=org.apache.kafka.connect.storage.StringConverter
+      - CONNECT_VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE=false
+      # where confluent-hub installs plugins
+      - CONNECT_PLUGIN_PATH=/usr/share/java,/usr/share/confluent-hub-components
+    ports:
+      - "8083:8083"
+    depends_on:
+      - kafka
+      - postgres
+    restart: unless-stopped
+    networks:
+      - kafka-network
+
+  # ---- Traccar Server ----
+  traccar:
+    image: traccar/traccar:latest
+    container_name: traccar
+    volumes:
+      - ./traccar/traccar.xml:/opt/traccar/conf/traccar.xml:ro
+      - ./traccar/logs:/opt/traccar/logs
+    environment:
+      - TZ=UTC
+    ports:
+      - "8082:8082"   # Traccar web UI/API
+      - "5055:5055"   # OsmAnd protocol (iOS client default)
+    networks:
+      - kafka-network
+
+# Add this service to your docker-compose.yaml
+  postgres-consumer:
+    build: ./postgres_consumer
+    container_name: postgres-consumer
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=gps.tracking.flat
+      - CONSUMER_GROUP=postgres-sink-group
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DB=playground
+      - PG_USER=admin
+      - PG_PASSWORD=
+      - kafka
+      - postgres
+      - adapter
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # ---- Adapter: Traccar forward → Kafka (with JDBC support) ----
+  adapter:
+    build: ./adapter
+    container_name: adapter
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=phone.telemetry.v2        # Original nested format
+      - KAFKA_TOPIC_JDBC=gps.tracking.flat    # New flat format for JDBC sink
+      - ADAPTER_BEARER_TOKEN=${ADAPTER_BEARER_TOKEN:-defaulttoken}
+      - ADAPTER_ALLOWED_TOKENS=
+    ports:
+      - "${ADAPTER_PORT:-5000}:5000"
+    depends_on:
+      - kafka
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+networks:
+  kafka-network:
+    driver: bridge
+
+volumes:
+  postgres_data:

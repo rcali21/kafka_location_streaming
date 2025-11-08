@@ -1,0 +1,10 @@
+# Ignore environment files
+.env
+
+# Ignore logs
+*.log
+traccar/logs/
+pgdata/
+
+# Ignore Python cache
+__pycache__/
